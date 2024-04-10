@@ -72,7 +72,7 @@ Shader "ArmNomads/Standard URP"
 	SubShader
 	{
 		Name "ForwardLit"
-		Tags { "RenderPipeline" = "UniversalRenderPipeline" "RenderType"="Opaque" "UniversalMaterialType" = "Lit" }
+		Tags { "RenderPipeline" = "UniversalPipeline" "RenderType"="Opaque" "UniversalMaterialType" = "Lit" }
 		LOD 100
 		Cull [_Culling]
 		ZTest [_ZTest]
