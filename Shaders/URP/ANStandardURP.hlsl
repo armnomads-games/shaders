@@ -11,9 +11,7 @@ struct Attributes
 	real4 positionOS : POSITION;
 	real2 uv : TEXCOORD0;
 	real3 normalOS : NORMAL;
-#if VERTEX_COLOR
 	half3 color : COLOR0;
-#endif
 #if DISPLACEMENT || NORMAL_MAP
 	real3 tangentOS : TANGENT;
 #endif
@@ -25,9 +23,7 @@ struct Varyings
 #if SPECULAR || RIM_LIGHTING || OVERLAY_PROJECTION || PLANE_CLIPPING || ((DISPLACEMENT || NORMAL_MAP) && WORLD_SPACE_UV)
 	real3 normal : NORMAL;
 #endif
-#if VERTEX_COLOR
 	half3 color : COLOR2;
-#endif
 	real2 uv : TEXCOORD0;
 	real4 shadowCoord : TEXCOORD2;
 #if WORLD_SPACE_UV
@@ -281,9 +277,7 @@ Varyings Vertex(Attributes v)
 	#if WORLD_SPACE_UV
 		o.triWeights = GetTriPlanarWeights(normal);
 	#endif
-	#if VERTEX_COLOR
-		o.color = v.color;
-	#endif
+	o.color = v.color;
 	o.uv = v.uv;
 	#if DISPLACEMENT || NORMAL_MAP
 		half3 worldTangent = TransformObjectToWorldDir(v.tangentOS);
