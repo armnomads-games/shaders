@@ -51,6 +51,8 @@ Shader "ArmNomads/Standard"
 		[HideInInspector] _OverlayTex ("Texture", 2D) = "black" {}
 
 		[Toggle(WORLD_SPACE_UV)] _WorldSpaceUV("World Space UV", Int) = 0
+		[Toggle(LOCAL_SPACE_UV)] _LocalSpaceUV("Local Space UV", Int) = 0
+		[HideInInspector] _LocalTriplanarWorldNormal("Use World Normal", Int) = 1
 		[HideInInspector] _TriBlendOffset("Blend Offset", Range(0,0.5)) = 0
 		[HideInInspector] _TriBlendExp("Blend Exponent", Range(1, 8)) = 2
 
@@ -93,6 +95,7 @@ Shader "ArmNomads/Standard"
 			#pragma shader_feature_local RIM_LIGHTING
 			#pragma shader_feature_local RIM_LIGHT_BASED
 			#pragma shader_feature_local WORLD_SPACE_UV
+			#pragma shader_feature_local LOCAL_SPACE_UV
 			#pragma shader_feature_local OVERLAY_TEXTURE
 			#pragma shader_feature_local OVERLAY_PROJECTION
 			#pragma shader_feature_local GRADIENT

@@ -6,6 +6,16 @@
 
 #define EPSILON 1e-4f
 
+inline real3 GetObjectScale()
+{
+	// Length of basis vectors in object->world matrix (handles non-uniform scale).
+	real3 scale;
+	scale.x = length(unity_ObjectToWorld._m00_m10_m20);
+	scale.y = length(unity_ObjectToWorld._m01_m11_m21);
+	scale.z = length(unity_ObjectToWorld._m02_m12_m22);
+	return max(scale, EPSILON);
+}
+
 struct Attributes
 {
 	real4 positionOS : POSITION;
@@ -20,16 +30,20 @@ struct Attributes
 struct Varyings
 {
 	real4 pos : SV_POSITION;
-#if SPECULAR || RIM_LIGHTING || OVERLAY_PROJECTION || PLANE_CLIPPING || ((DISPLACEMENT || NORMAL_MAP) && WORLD_SPACE_UV)
+#if SPECULAR || RIM_LIGHTING || OVERLAY_PROJECTION || PLANE_CLIPPING || (WORLD_SPACE_UV || LOCAL_SPACE_UV) || ((DISPLACEMENT || NORMAL_MAP) && (WORLD_SPACE_UV || LOCAL_SPACE_UV))
 	real3 normal : NORMAL;
 #endif
 	half3 color : COLOR2;
 	real2 uv : TEXCOORD0;
 	real4 shadowCoord : TEXCOORD2;
-#if WORLD_SPACE_UV
+#if WORLD_SPACE_UV || LOCAL_SPACE_UV
 	real3 triWeights : TEXCOORD3;
 #endif
 	real4 worldPosAndFogFactor : TEXCOORD4;
+#if LOCAL_SPACE_UV
+	real3 triPosOS : TEXCOORD6;
+	real3 triNormalOS : TEXCOORD7;
+#endif
 #if DISPLACEMENT || NORMAL_MAP
 	real3x3 TBN : TEXCOORD5;
 #else
@@ -85,11 +99,18 @@ struct Varyings
 	}
 #endif
 
-#if WORLD_SPACE_UV
+#if WORLD_SPACE_UV || LOCAL_SPACE_UV
 	inline half3 GetTriPlanarWeights(half3 normal)
 	{
-		half3 triWeights = saturate(abs(normal) - _TriBlendOffset);
-		triWeights = pow(triWeights, _TriBlendExp);
+		#if LOCAL_SPACE_UV
+			// Shader Graph-style: pure exponent blending, no offset.
+			// Use large exponent values (50-200) for "one seam" look.
+			half3 triWeights = pow(abs(normal), _TriBlendExp);
+		#else
+			// World space: offset + exponent (original behavior).
+			half3 triWeights = saturate(abs(normal) - _TriBlendOffset);
+			triWeights = pow(triWeights, _TriBlendExp);
+		#endif
 		return triWeights / (triWeights.x + triWeights.y + triWeights.z);
 	}
 
@@ -127,6 +148,52 @@ struct Varyings
 							normalXZ * weights.y +
 							normalXY * weights.z +
 							wNormal);
+	}
+#endif
+
+#if WORLD_SPACE_UV || LOCAL_SPACE_UV
+	inline real3 GetTriplanarPos(Varyings i)
+	{
+		#if LOCAL_SPACE_UV
+			return i.triPosOS;
+		#else
+			return i.worldPosAndFogFactor.xyz;
+		#endif
+	}
+
+	inline half3 GetTriplanarBaseNormal(Varyings i)
+	{
+		#if LOCAL_SPACE_UV
+			return normalize(i.triNormalOS);
+		#else
+			return normalize(i.normal);
+		#endif
+	}
+
+	// Get triplanar weights - for LOCAL_SPACE_UV compute per-pixel for sharp results
+	inline half3 GetTriplanarWeightsFragment(Varyings i)
+	{
+		#if LOCAL_SPACE_UV
+			// Use float precision to handle high exponent values without precision loss.
+			float3 n;
+			if (_LocalTriplanarWorldNormal > 0.5)
+			{
+				// World-space normal for blending (Shader Graph style) - cleaner at high blend values
+				n = abs(normalize(i.normal));
+			}
+			else
+			{
+				// Object-space normal for blending (fully local) - texture blending rotates with object
+				n = abs(normalize(i.triNormalOS));
+			}
+			// Shader Graph style: pow then normalize by dot product
+			float3 w = pow(n, _TriBlendExp);
+			w /= dot(w, 1.0);
+			return (half3)w;
+		#else
+			// World space uses precomputed weights from vertex shader.
+			return i.triWeights;
+		#endif
 	}
 #endif
 
@@ -186,12 +253,25 @@ inline half4 CalculateShading(half3 diffuse, Varyings i, half facing)
 	#endif
 
 	#if DISPLACEMENT || NORMAL_MAP
-		#if WORLD_SPACE_UV
+		#if WORLD_SPACE_UV || LOCAL_SPACE_UV
+			real3 triPos = GetTriplanarPos(i);
+			half3 triBaseNormal = GetTriplanarBaseNormal(i);
+			half3 triWeights = GetTriplanarWeightsFragment(i);
 			#if DISPLACEMENT
-				normal = ReconstructNormalTriplanar(_DisplaceMap, _DisplaceMap_TexelSize, i.triWeights, i.normal, i.worldPosAndFogFactor.xyz, _DisplaceHeight, _MainTex_ST);
+				half3 triNormal = ReconstructNormalTriplanar(_DisplaceMap, _DisplaceMap_TexelSize, triWeights, triBaseNormal, triPos, _DisplaceHeight, _MainTex_ST);
+				#if LOCAL_SPACE_UV
+					normal = normalize(TransformObjectToWorldNormal(triNormal));
+				#else
+					normal = triNormal;
+				#endif
 			#else
-				normal = GetTriplanarNormal(_NormalMapTex, i.triWeights, i.normal, i.worldPosAndFogFactor.xyz, _MainTex_ST);
-				normal = lerp(normal, i.normal, _NormalSmoothing);
+				half3 triNormal = GetTriplanarNormal(_NormalMapTex, triWeights, triBaseNormal, triPos, _MainTex_ST);
+				#if LOCAL_SPACE_UV
+					normal = normalize(TransformObjectToWorldNormal(triNormal));
+					normal = normalize(lerp(normal, normalize(i.normal), _NormalSmoothing));
+				#else
+					normal = lerp(triNormal, i.normal, _NormalSmoothing);
+				#endif
 			#endif
 		#else
 			i.TBN = half3x3(normalize(i.TBN[0]), normalize(i.TBN[1]), normalize(i.TBN[2]));
@@ -238,7 +318,7 @@ inline half4 CalculateShading(half3 diffuse, Varyings i, half facing)
 	#if RIM_LIGHTING
 		half3 rimMask = half3(1.0, 1.0, 1.0);
 		#if RIM_LIGHT_BASED
-			rimMask = ramp * _MainLightColor;
+			rimMask = ramp * _MainLightColor.rgb;
 		#endif
 		half ndv = 1.0 - max(0, dot(viewDir, normal));
 		half rim = smoothstep(_RimMin, _RimMax, ndv);
@@ -246,20 +326,20 @@ inline half4 CalculateShading(half3 diffuse, Varyings i, half facing)
 	#endif
 
 	#if SPECULAR
-		#if WORLD_SPACE_UV
-			half specularMap = TriplanarSample(_SpecGlossMap, i.triWeights, i.worldPosAndFogFactor.xyz, _MainTex_ST);
+		#if WORLD_SPACE_UV || LOCAL_SPACE_UV
+			half specularMap = TriplanarSample(_SpecGlossMap, GetTriplanarWeightsFragment(i), GetTriplanarPos(i), _MainTex_ST).r;
 		#else
 			half specularMap = tex2D(_SpecGlossMap, i.uv * _MainTex_ST.xy + _MainTex_ST.zw).r;
 		#endif
-		half spec = CalculateSpecular(_MainLightPosition, viewDir, normal, specularMap);
-		half ndl = max(0.0, dot(normal, _MainLightPosition));
+		half spec = CalculateSpecular(_MainLightPosition.xyz, viewDir, normal, specularMap);
+		half ndl = max(0.0, dot(normal, _MainLightPosition.xyz));
 		col.rgb += spec * specularMap* shadow* ndl * _MainLightColor.rgb* _SpecularColor.rgb;
 	#endif
 
 	#if EMISSION
 		emission += _EmissionColor;
-		#if WORLD_SPACE_UV
-			half3 emissionMap = TriplanarSample(_EmissionMap, i.triWeights, i.worldPosAndFogFactor.xyz, _EmissionMap_ST).rgb;
+		#if WORLD_SPACE_UV || LOCAL_SPACE_UV
+			half3 emissionMap = TriplanarSample(_EmissionMap, GetTriplanarWeightsFragment(i), GetTriplanarPos(i), _EmissionMap_ST).rgb;
 		#else
 			half3 emissionMap = tex2D(_EmissionMap, i.uv * _EmissionMap_ST.xy + _EmissionMap_ST.zw).rgb;
 		#endif
@@ -272,32 +352,63 @@ inline half4 CalculateShading(half3 diffuse, Varyings i, half facing)
 Varyings Vertex(Attributes v)
 {
 	Varyings o;
-	half3 normal = TransformObjectToWorldNormal(v.normalOS);
-	o.worldPosAndFogFactor.xyz = TransformObjectToWorld(v.positionOS.xyz).xyz;
-	#if WORLD_SPACE_UV
-		o.triWeights = GetTriPlanarWeights(normal);
+
+	// Normals are computed from the original mesh normal (position changes below don't affect it).
+	half3 normalWS = TransformObjectToWorldNormal(v.normalOS);
+
+	#if LOCAL_SPACE_UV
+		real3 objScale = GetObjectScale();
 	#endif
+
+	#if WORLD_SPACE_UV || LOCAL_SPACE_UV
+		half3 triNormalForWeights = normalWS;
+		#if LOCAL_SPACE_UV
+			// For local/object triplanar we want weights that match the *scaled* surface.
+			// Using normalOS directly breaks on non-uniform scale; compensate by dividing by scale.
+			triNormalForWeights = normalize(v.normalOS / objScale);
+		#endif
+		o.triWeights = GetTriPlanarWeights(triNormalForWeights);
+	#endif
+
 	o.color = v.color;
 	o.uv = v.uv;
+
 	#if DISPLACEMENT || NORMAL_MAP
 		half3 worldTangent = TransformObjectToWorldDir(v.tangentOS);
 		half3 worldNormal = TransformObjectToWorldDir(v.normalOS);
 		half3 worldBiTangent = cross(worldTangent, worldNormal);
 		o.TBN = half3x3(worldTangent, worldBiTangent, worldNormal);
 		#if DISPLACEMENT
-			#if WORLD_SPACE_UV
-				real displace = TriplanarSampleLod(_DisplaceMap, o.triWeights, o.worldPosAndFogFactor.xyz, _MainTex_ST, 0.0);
+			#if WORLD_SPACE_UV || LOCAL_SPACE_UV
+				real3 triPos = TransformObjectToWorld(v.positionOS.xyz);
+				#if LOCAL_SPACE_UV
+					// Use "object axes, world units" so tiling doesn't change with transform scale.
+					triPos = v.positionOS.xyz * objScale;
+				#endif
+				real displace = TriplanarSampleLod(_DisplaceMap, o.triWeights, triPos, _MainTex_ST, 0.0).r;
 			#else
 				real displace = tex2Dlod(_DisplaceMap, half4(v.uv * _MainTex_ST.xy + _MainTex_ST.zw, 0.0, 0.0)).r;
 			#endif
-			v.positionOS.xyz = TransformWorldToObject(o.worldPosAndFogFactor.xyz + worldNormal * displace * _DisplaceHeight);
+			real3 worldPosPre = TransformObjectToWorld(v.positionOS.xyz).xyz;
+			v.positionOS.xyz = TransformWorldToObject(worldPosPre + worldNormal * displace * _DisplaceHeight);
 		#endif
 	#else
-		o.ambient = SampleSHVertex(normal);
-		o.ramp = GetLightingRamp(normal);
+		o.ambient = SampleSHVertex(normalWS);
+		o.ramp = GetLightingRamp(normalWS);
 	#endif
-	#if SPECULAR || RIM_LIGHTING ||	OVERLAY_PROJECTION || PLANE_CLIPPING || ((DISPLACEMENT || NORMAL_MAP) && WORLD_SPACE_UV)
-			o.normal = normal;
+
+	// World position used by lighting/fog/etc. (computed after displacement, if any).
+	o.worldPosAndFogFactor.xyz = TransformObjectToWorld(v.positionOS.xyz).xyz;
+
+	#if LOCAL_SPACE_UV
+		// Store scaled position so sampling is independent of transform scale.
+		o.triPosOS = v.positionOS.xyz * objScale;
+		// Keep base normal in true object space so we can safely TransformObjectToWorldNormal(...) later.
+		o.triNormalOS = normalize(v.normalOS);
+	#endif
+
+	#if SPECULAR || RIM_LIGHTING || OVERLAY_PROJECTION || PLANE_CLIPPING || (WORLD_SPACE_UV || LOCAL_SPACE_UV) || ((DISPLACEMENT || NORMAL_MAP) && (WORLD_SPACE_UV || LOCAL_SPACE_UV))
+			o.normal = normalWS;
 	#endif
 	o.pos = TransformObjectToHClip(v.positionOS.xyz);
 	o.worldPosAndFogFactor.w = o.pos.z;
@@ -326,8 +437,8 @@ half4 Fragment(Varyings i, half facing : VFACE) : SV_Target
 		clip(dot((_PlanePosition - i.worldPosAndFogFactor.xyz), _PlaneNormal));
 	#endif
 
-	#if WORLD_SPACE_UV
-		half3 diffuse = TriplanarSample(_MainTex, i.triWeights, i.worldPosAndFogFactor.xyz, _MainTex_ST).rgb;
+	#if WORLD_SPACE_UV || LOCAL_SPACE_UV
+		half3 diffuse = TriplanarSample(_MainTex, GetTriplanarWeightsFragment(i), GetTriplanarPos(i), _MainTex_ST).rgb;
 	#else
 		half3 diffuse = tex2D(_MainTex, i.uv * _MainTex_ST.xy + _MainTex_ST.zw).rgb;
 	#endif
@@ -344,8 +455,8 @@ half4 Fragment(Varyings i, half facing : VFACE) : SV_Target
 			half3 localPos = TransformWorldToObject(i.worldPosAndFogFactor.xyz);
 			real2 uv = mul(GetTransformationMatrix(projPlaneNormal), localPos).xy / _ProjScaleOffset.xy + _ProjScaleOffset.zw + 0.5;
 			half4 overlay = tex2D(_OverlayTex, uv) * step(0,dot(projPlaneNormal, i.normal));
-		#elif WORLD_SPACE_UV
-			half4 overlay = TriplanarSample(_OverlayTex, i.triWeights, i.worldPosAndFogFactor.xyz, _OverlayTex_ST);
+		#elif WORLD_SPACE_UV || LOCAL_SPACE_UV
+			half4 overlay = TriplanarSample(_OverlayTex, GetTriplanarWeightsFragment(i), GetTriplanarPos(i), _OverlayTex_ST);
 		#else
 			half4 overlay = tex2D(_OverlayTex, i.uv * _OverlayTex_ST.xy + _OverlayTex_ST.zw);
 		#endif

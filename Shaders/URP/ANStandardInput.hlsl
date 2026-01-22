@@ -42,9 +42,10 @@ real _GradSize;
 real4 _GradTopColor;
 real4 _GradBottomColor;
 
-//WORLD_SPACE_UV
+//WORLD_SPACE_UV / LOCAL_SPACE_UV
 real _TriBlendOffset;
 real _TriBlendExp;
+real _LocalTriplanarWorldNormal;
 
 //PLANE_CLIPPING
 real3 _PlanePosition;
